@@ -1,0 +1,398 @@
+name: Build CN GMS Unlocker APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/build-apk.yml"
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Generate minimal Android LSPosed project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > settings.gradle <<'GRADLE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("https://api.xposed.info/") }
+              }
+          }
+
+          rootProject.name = "CnGmsUnlocker"
+          include ":app"
+          GRADLE
+
+          cat > build.gradle <<'GRADLE'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          GRADLE
+
+          mkdir -p app/src/main/java/io/github/cngmsunlocker
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/assets
+
+          cat > app/build.gradle <<'GRADLE'
+          plugins {
+              id "com.android.application"
+          }
+
+          android {
+              namespace "io.github.cngmsunlocker"
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "io.github.cngmsunlocker"
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 2
+                  versionName "1.1"
+              }
+          }
+
+          dependencies {
+              compileOnly "de.robv.android.xposed:api:82"
+          }
+          GRADLE
+
+          cat > app/src/main/AndroidManifest.xml <<'XML'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="false"
+                  android:hasCode="true"
+                  android:label="@string/app_name"
+                  android:theme="@style/AppTheme">
+
+                  <meta-data
+                      android:name="xposedmodule"
+                      android:value="true" />
+
+                  <meta-data
+                      android:name="xposeddescription"
+                      android:value="Remove CN GMS feature restrictions" />
+
+                  <meta-data
+                      android:name="xposedminversion"
+                      android:value="93" />
+
+                  <meta-data
+                      android:name="xposedscope"
+                      android:resource="@array/module_scope" />
+              </application>
+          </manifest>
+          XML
+
+          cat > app/src/main/res/values/strings.xml <<'XML'
+          <resources>
+              <string name="app_name">CN GMS Unlocker</string>
+          </resources>
+          XML
+
+          cat > app/src/main/res/values/styles.xml <<'XML'
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" />
+          </resources>
+          XML
+
+          cat > app/src/main/res/values/arrays.xml <<'XML'
+          <resources>
+              <string-array name="module_scope">
+                  <item>android</item>
+              </string-array>
+          </resources>
+          XML
+
+          cat > app/src/main/assets/xposed_init <<'TXT'
+          io.github.cngmsunlocker.HookEntry
+          TXT
+
+          cat > app/src/main/java/io/github/cngmsunlocker/HookEntry.java <<'JAVA'
+          package io.github.cngmsunlocker;
+
+          import java.lang.reflect.Field;
+          import java.lang.reflect.Method;
+          import java.util.Collection;
+          import java.util.Iterator;
+          import java.util.Map;
+
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+          public final class HookEntry implements IXposedHookLoadPackage {
+              private static final String TAG = "CnGmsUnlocker";
+              private static final String SYSTEM_CONFIG = "com.android.server.SystemConfig";
+
+              private static final String[] BLOCKED_FEATURES = new String[] {
+                      "cn.google.services",
+                      "com.google.android.feature.services_updater"
+              };
+
+              private static volatile boolean getAvailableFeaturesHookUsed = false;
+
+              @Override
+              public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+                  if (!"android".equals(lpparam.packageName)) {
+                      return;
+                  }
+
+                  log("loaded android process");
+                  hookSystemConfig(lpparam.classLoader);
+              }
+
+              private static void hookSystemConfig(ClassLoader classLoader) {
+                  try {
+                      Class<?> systemConfigClass = XposedHelpers.findClass(SYSTEM_CONFIG, classLoader);
+
+                      XposedBridge.hookAllConstructors(systemConfigClass, new XC_MethodHook() {
+                          @Override
+                          protected void afterHookedMethod(MethodHookParam param) {
+                              log("SystemConfig constructor hooked");
+                              removeBlockedFeatures(param.thisObject, true);
+                          }
+                      });
+
+                      XposedBridge.hookAllMethods(systemConfigClass, "getAvailableFeatures", new XC_MethodHook() {
+                          @Override
+                          protected void beforeHookedMethod(MethodHookParam param) {
+                              removeBlockedFeatures(param.thisObject, false);
+
+                              if (!getAvailableFeaturesHookUsed) {
+                                  getAvailableFeaturesHookUsed = true;
+                                  log("patched before getAvailableFeatures");
+                              }
+                          }
+
+                          @Override
+                          protected void afterHookedMethod(MethodHookParam param) {
+                              Object result = param.getResult();
+                              removeBlockedFromObject(result);
+                          }
+                      });
+
+                      log("SystemConfig hooks installed");
+                  } catch (Throwable t) {
+                      log("SystemConfig hook failed: " + t);
+                  }
+              }
+
+              private static void removeBlockedFeatures(Object systemConfig, boolean verbose) {
+                  if (systemConfig == null) {
+                      return;
+                  }
+
+                  boolean removedByMethod = false;
+
+                  try {
+                      Method removeFeature = findMethod(systemConfig.getClass(), "removeFeature", String.class);
+                      if (removeFeature != null) {
+                          removeFeature.setAccessible(true);
+                          for (String feature : BLOCKED_FEATURES) {
+                              removeFeature.invoke(systemConfig, feature);
+                          }
+                          removedByMethod = true;
+                      }
+                  } catch (Throwable t) {
+                      log("removeFeature invoke failed: " + t);
+                  }
+
+                  removeBlockedFromObject(systemConfig);
+
+                  if (verbose) {
+                      log(removedByMethod
+                              ? "removed CN GMS features via SystemConfig.removeFeature"
+                              : "removeFeature not found; used reflective fallback");
+                  }
+              }
+
+              private static Method findMethod(Class<?> cls, String name, Class<?>... parameterTypes) {
+                  Class<?> current = cls;
+                  while (current != null) {
+                      try {
+                          return current.getDeclaredMethod(name, parameterTypes);
+                      } catch (NoSuchMethodException ignored) {
+                          current = current.getSuperclass();
+                      }
+                  }
+                  return null;
+              }
+
+              private static void removeBlockedFromObject(Object object) {
+                  if (object == null) {
+                      return;
+                  }
+
+                  if (object instanceof Map<?, ?>) {
+                      removeBlockedFromMap((Map<?, ?>) object);
+                      return;
+                  }
+
+                  if (object instanceof Collection<?>) {
+                      removeBlockedFromCollection((Collection<?>) object);
+                      return;
+                  }
+
+                  Class<?> cls = object.getClass();
+                  while (cls != null) {
+                      Field[] fields = cls.getDeclaredFields();
+                      for (Field field : fields) {
+                          try {
+                              field.setAccessible(true);
+                              Object value = field.get(object);
+                              if (value instanceof Map<?, ?>) {
+                                  removeBlockedFromMap((Map<?, ?>) value);
+                              } else if (value instanceof Collection<?>) {
+                                  removeBlockedFromCollection((Collection<?>) value);
+                              }
+                          } catch (Throwable ignored) {
+                          }
+                      }
+                      cls = cls.getSuperclass();
+                  }
+              }
+
+              private static void removeBlockedFromMap(Map<?, ?> map) {
+                  try {
+                      for (String feature : BLOCKED_FEATURES) {
+                          try {
+                              map.remove(feature);
+                          } catch (Throwable ignored) {
+                          }
+                      }
+
+                      Iterator<?> iterator = map.entrySet().iterator();
+                      while (iterator.hasNext()) {
+                          Object item = iterator.next();
+                          if (!(item instanceof Map.Entry<?, ?>)) {
+                              continue;
+                          }
+                          Map.Entry<?, ?> entry = (Map.Entry<?, ?>) item;
+                          if (isBlockedFeature(entry.getKey()) || isBlockedFeatureObject(entry.getValue())) {
+                              try {
+                                  iterator.remove();
+                              } catch (Throwable ignored) {
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private static void removeBlockedFromCollection(Collection<?> collection) {
+                  try {
+                      Iterator<?> iterator = collection.iterator();
+                      while (iterator.hasNext()) {
+                          Object value = iterator.next();
+                          if (isBlockedFeature(value) || isBlockedFeatureObject(value)) {
+                              try {
+                                  iterator.remove();
+                              } catch (Throwable ignored) {
+                              }
+                          }
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private static boolean isBlockedFeature(Object value) {
+                  if (!(value instanceof String)) {
+                      return false;
+                  }
+                  String name = (String) value;
+                  for (String feature : BLOCKED_FEATURES) {
+                      if (feature.equals(name)) {
+                          return true;
+                      }
+                  }
+                  return false;
+              }
+
+              private static boolean isBlockedFeatureObject(Object value) {
+                  if (value == null) {
+                      return false;
+                  }
+
+                  try {
+                      Field nameField = value.getClass().getDeclaredField("name");
+                      nameField.setAccessible(true);
+                      return isBlockedFeature(nameField.get(value));
+                  } catch (Throwable ignored) {
+                      return false;
+                  }
+              }
+
+              private static void log(String message) {
+                  XposedBridge.log("[" + TAG + "] " + message);
+              }
+          }
+          JAVA
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/CnGmsUnlocker-debug.apk
+          ls -lh out
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CnGmsUnlocker-debug-apk
+          path: out/CnGmsUnlocker-debug.apk
+          if-no-files-found: error
+          
