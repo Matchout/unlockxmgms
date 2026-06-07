@@ -1,4 +1,4 @@
-name: Build APK
+name: Build API101 APK
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > settings.gradle <<'EOF'
+          cat > settings.gradle <<'EOF_SETTINGS'
           pluginManagement {
               repositories {
                   google()
@@ -51,27 +51,24 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
-                  maven {
-                      url = uri("https://api.xposed.info/")
-                  }
               }
           }
 
-          rootProject.name = "CnGmsUnlocker"
+          rootProject.name = "CnGmsUnlockerApi101"
           include ":app"
-          EOF
+          EOF_SETTINGS
 
-          cat > build.gradle <<'EOF'
+          cat > build.gradle <<'EOF_ROOT_GRADLE'
           plugins {
               id "com.android.application" version "8.7.3" apply false
           }
-          EOF
+          EOF_ROOT_GRADLE
 
           mkdir -p app/src/main/java/io/github/cngmsunlocker
           mkdir -p app/src/main/res/values
-          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/resources/META-INF/xposed
 
-          cat > app/build.gradle <<'EOF'
+          cat > app/build.gradle <<'EOF_APP_GRADLE'
           plugins {
               id "com.android.application"
           }
@@ -84,171 +81,171 @@ jobs:
                   applicationId "io.github.cngmsunlocker"
                   minSdk 23
                   targetSdk 35
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 10101
+                  versionName "1.0.1-api101"
               }
           }
 
           dependencies {
-              compileOnly "de.robv.android.xposed:api:82"
+              compileOnly "io.github.libxposed:api:101.0.1"
           }
-          EOF
+          EOF_APP_GRADLE
 
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          cat > app/src/main/AndroidManifest.xml <<'EOF_MANIFEST'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
                   android:allowBackup="false"
+                  android:description="@string/app_description"
+                  android:extractNativeLibs="false"
                   android:hasCode="true"
                   android:label="@string/app_name"
-                  android:theme="@style/AppTheme">
-
-                  <meta-data
-                      android:name="xposedmodule"
-                      android:value="true" />
-
-                  <meta-data
-                      android:name="xposeddescription"
-                      android:value="Remove CN GMS feature flags" />
-
-                  <meta-data
-                      android:name="xposedminversion"
-                      android:value="93" />
-              </application>
+                  android:theme="@style/AppTheme" />
           </manifest>
-          EOF
+          EOF_MANIFEST
 
-          cat > app/src/main/res/values/strings.xml <<'EOF'
+          cat > app/src/main/res/values/strings.xml <<'EOF_STRINGS'
           <resources>
               <string name="app_name">CN GMS Unlocker</string>
+              <string name="app_description">Remove CN GMS feature flags from SystemConfig</string>
           </resources>
-          EOF
+          EOF_STRINGS
 
-          cat > app/src/main/res/values/styles.xml <<'EOF'
+          cat > app/src/main/res/values/styles.xml <<'EOF_STYLES'
           <resources>
               <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" />
           </resources>
-          EOF
+          EOF_STYLES
 
-          cat > app/src/main/assets/xposed_init <<'EOF'
+          cat > app/src/main/resources/META-INF/xposed/java_init.list <<'EOF_JAVA_INIT'
           io.github.cngmsunlocker.HookEntry
-          EOF
+          EOF_JAVA_INIT
 
-          cat > app/src/main/assets/scope.list <<'EOF'
-          android
-          EOF
+          cat > app/src/main/resources/META-INF/xposed/module.prop <<'EOF_MODULE_PROP'
+          minApiVersion=101
+          targetApiVersion=101
+          staticScope=true
+          EOF_MODULE_PROP
 
-          cat > app/src/main/java/io/github/cngmsunlocker/HookEntry.java <<'EOF'
+          cat > app/src/main/resources/META-INF/xposed/scope.list <<'EOF_SCOPE'
+          system
+          EOF_SCOPE
+
+          cat > app/src/main/java/io/github/cngmsunlocker/HookEntry.java <<'EOF_JAVA'
           package io.github.cngmsunlocker;
 
+          import android.util.Log;
+
+          import java.lang.reflect.Constructor;
           import java.lang.reflect.Method;
 
-          import de.robv.android.xposed.IXposedHookLoadPackage;
-          import de.robv.android.xposed.XC_MethodHook;
-          import de.robv.android.xposed.XposedBridge;
-          import de.robv.android.xposed.XposedHelpers;
-          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+          import io.github.libxposed.api.XposedModule;
+          import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
+          import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
-          public final class HookEntry implements IXposedHookLoadPackage {
+          public final class HookEntry extends XposedModule {
               private static final String TAG = "CnGmsUnlocker";
 
               private static final String FEATURE_CN_GMS = "cn.google.services";
               private static final String FEATURE_SERVICES_UPDATER = "com.google.android.feature.services_updater";
 
-              private static volatile boolean oneShotInstalled = false;
+              private static volatile boolean loggedOnce = false;
 
               @Override
-              public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-                  if (!"android".equals(lpparam.packageName)) {
-                      return;
-                  }
-
-                  log("loaded android process");
-                  hookSystemConfig(lpparam.classLoader);
+              public void onModuleLoaded(ModuleLoadedParam param) {
+                  logInfo("module loaded, api=" + getApiVersion()
+                          + ", framework=" + getFrameworkName()
+                          + " " + getFrameworkVersion());
               }
 
-              private static void hookSystemConfig(ClassLoader classLoader) {
+              @Override
+              public void onSystemServerStarting(SystemServerStartingParam param) {
+                  logInfo("system server starting");
+                  hookSystemConfig(param.getClassLoader());
+              }
+
+              private void hookSystemConfig(ClassLoader classLoader) {
                   try {
-                      Class<?> systemConfigClass = XposedHelpers.findClass(
+                      Class<?> systemConfigClass = Class.forName(
                               "com.android.server.SystemConfig",
+                              false,
                               classLoader
                       );
 
-                      XposedBridge.hookAllConstructors(systemConfigClass, new XC_MethodHook() {
-                          @Override
-                          protected void afterHookedMethod(MethodHookParam param) {
-                              log("SystemConfig constructor hit");
-                              removeCnGmsFeatures(param.thisObject, "constructor");
-                          }
-                      });
-
-                      XposedBridge.hookAllMethods(systemConfigClass, "getAvailableFeatures", new XC_MethodHook() {
-                          @Override
-                          protected void beforeHookedMethod(MethodHookParam param) {
-                              removeCnGmsFeatures(param.thisObject, "before getAvailableFeatures");
-                          }
-                      });
-
-                      try {
-                          XposedBridge.hookAllMethods(systemConfigClass, "getInstance", new XC_MethodHook() {
-                              @Override
-                              protected void afterHookedMethod(MethodHookParam param) {
-                                  Object instance = param.getResult();
-                                  if (instance != null) {
-                                      removeCnGmsFeatures(instance, "after getInstance");
-                                  }
+                      for (Constructor<?> constructor : systemConfigClass.getDeclaredConstructors()) {
+                          constructor.setAccessible(true);
+                          hook(constructor).intercept(chain -> {
+                              Object result = chain.proceed();
+                              Object thisObject = chain.getThisObject();
+                              if (thisObject != null) {
+                                  removeCnGmsFeatures(thisObject, "constructor");
                               }
+                              return result;
                           });
-                      } catch (Throwable t) {
-                          log("getInstance hook skipped: " + t);
                       }
 
-                      log("SystemConfig hooks installed");
+                      for (Method method : systemConfigClass.getDeclaredMethods()) {
+                          if ("getInstance".equals(method.getName())) {
+                              method.setAccessible(true);
+                              hook(method).intercept(chain -> {
+                                  Object result = chain.proceed();
+                                  if (result != null) {
+                                      removeCnGmsFeatures(result, "after getInstance");
+                                  }
+                                  return result;
+                              });
+                          }
+
+                          if ("getAvailableFeatures".equals(method.getName())) {
+                              method.setAccessible(true);
+                              hook(method).intercept(chain -> {
+                                  Object thisObject = chain.getThisObject();
+                                  if (thisObject != null) {
+                                      removeCnGmsFeatures(thisObject, "before getAvailableFeatures");
+                                  }
+                                  return chain.proceed();
+                              });
+                          }
+                      }
+
+                      logInfo("SystemConfig hooks installed");
                   } catch (Throwable t) {
-                      log("SystemConfig hook failed: " + t);
+                      logError("SystemConfig hook failed", t);
                   }
               }
 
-              private static void removeCnGmsFeatures(Object systemConfig, String source) {
-                  if (systemConfig == null) {
-                      log(source + ": SystemConfig object is null");
-                      return;
-                  }
-
+              private void removeCnGmsFeatures(Object systemConfig, String source) {
                   boolean ok1 = callRemoveFeature(systemConfig, FEATURE_CN_GMS);
                   boolean ok2 = callRemoveFeature(systemConfig, FEATURE_SERVICES_UPDATER);
 
-                  log(source + ": removeFeature results: "
-                          + FEATURE_CN_GMS + "=" + ok1 + ", "
-                          + FEATURE_SERVICES_UPDATER + "=" + ok2);
-
-                  if (!oneShotInstalled) {
-                      oneShotInstalled = true;
-                      log("CN GMS feature removal attempted");
+                  if (!loggedOnce || !ok1 || !ok2) {
+                      loggedOnce = true;
+                      logInfo(source + ": removeFeature results: "
+                              + FEATURE_CN_GMS + "=" + ok1 + ", "
+                              + FEATURE_SERVICES_UPDATER + "=" + ok2);
                   }
               }
 
-              private static boolean callRemoveFeature(Object systemConfig, String featureName) {
+              private boolean callRemoveFeature(Object systemConfig, String featureName) {
                   try {
                       Method method = systemConfig.getClass().getDeclaredMethod("removeFeature", String.class);
                       method.setAccessible(true);
                       method.invoke(systemConfig, featureName);
                       return true;
-                  } catch (Throwable first) {
-                      try {
-                          XposedHelpers.callMethod(systemConfig, "removeFeature", featureName);
-                          return true;
-                      } catch (Throwable second) {
-                          log("removeFeature failed for " + featureName + ": " + second);
-                          return false;
-                      }
+                  } catch (Throwable t) {
+                      logError("removeFeature failed for " + featureName, t);
+                      return false;
                   }
               }
 
-              private static void log(String message) {
-                  XposedBridge.log("[" + TAG + "] " + message);
+              private void logInfo(String message) {
+                  log(Log.INFO, TAG, message);
+              }
+
+              private void logError(String message, Throwable throwable) {
+                  log(Log.ERROR, TAG, message, throwable);
               }
           }
-          EOF
+          EOF_JAVA
 
       - name: Build debug APK
         shell: bash
@@ -261,12 +258,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk out/CnGmsUnlocker-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk out/CnGmsUnlocker-api101-debug.apk
           ls -lh out
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CnGmsUnlocker-debug-apk
-          path: out/CnGmsUnlocker-debug.apk
+          name: CnGmsUnlocker-api101-debug-apk
+          path: out/CnGmsUnlocker-api101-debug.apk
           if-no-files-found: error
