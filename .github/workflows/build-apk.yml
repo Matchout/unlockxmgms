@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build APK
     runs-on: ubuntu-latest
 
     permissions:
@@ -79,10 +79,10 @@ jobs:
 
               defaultConfig {
                   applicationId "io.github.cngmsunlocker"
-                  minSdk 23
+                  minSdk 27
                   targetSdk 35
-                  versionCode 10101
-                  versionName "1.0.1-api101"
+                  versionCode 10102
+                  versionName "1.0.2-api101"
               }
           }
 
@@ -96,10 +96,8 @@ jobs:
               <application
                   android:allowBackup="false"
                   android:description="@string/app_description"
-                  android:extractNativeLibs="false"
                   android:hasCode="true"
-                  android:label="@string/app_name"
-                  android:theme="@style/AppTheme" />
+                  android:label="@string/app_name" />
           </manifest>
           EOF_MANIFEST
 
@@ -110,17 +108,17 @@ jobs:
           </resources>
           EOF_STRINGS
 
-          cat > app/src/main/res/values/styles.xml <<'EOF_STYLES'
-          <resources>
-              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" />
-          </resources>
-          EOF_STYLES
-
           cat > app/src/main/resources/META-INF/xposed/java_init.list <<'EOF_JAVA_INIT'
           io.github.cngmsunlocker.HookEntry
           EOF_JAVA_INIT
 
           cat > app/src/main/resources/META-INF/xposed/module.prop <<'EOF_MODULE_PROP'
+          id=io.github.cngmsunlocker
+          name=CN GMS Unlocker
+          version=1.0.2-api101
+          versionCode=10102
+          author=Matchout
+          description=Remove cn.google.services and com.google.android.feature.services_updater from SystemConfig
           minApiVersion=101
           targetApiVersion=101
           staticScope=true
@@ -148,7 +146,7 @@ jobs:
               private static final String FEATURE_CN_GMS = "cn.google.services";
               private static final String FEATURE_SERVICES_UPDATER = "com.google.android.feature.services_updater";
 
-              private static volatile boolean loggedOnce = false;
+              private volatile boolean loggedSuccessOnce = false;
 
               @Override
               public void onModuleLoaded(ModuleLoadedParam param) {
@@ -171,41 +169,11 @@ jobs:
                               classLoader
                       );
 
-                      for (Constructor<?> constructor : systemConfigClass.getDeclaredConstructors()) {
-                          constructor.setAccessible(true);
-                          hook(constructor).intercept(chain -> {
-                              Object result = chain.proceed();
-                              Object thisObject = chain.getThisObject();
-                              if (thisObject != null) {
-                                  removeCnGmsFeatures(thisObject, "constructor");
-                              }
-                              return result;
-                          });
-                      }
+                      Method removeFeatureMethod = systemConfigClass.getDeclaredMethod("removeFeature", String.class);
+                      removeFeatureMethod.setAccessible(true);
 
-                      for (Method method : systemConfigClass.getDeclaredMethods()) {
-                          if ("getInstance".equals(method.getName())) {
-                              method.setAccessible(true);
-                              hook(method).intercept(chain -> {
-                                  Object result = chain.proceed();
-                                  if (result != null) {
-                                      removeCnGmsFeatures(result, "after getInstance");
-                                  }
-                                  return result;
-                              });
-                          }
-
-                          if ("getAvailableFeatures".equals(method.getName())) {
-                              method.setAccessible(true);
-                              hook(method).intercept(chain -> {
-                                  Object thisObject = chain.getThisObject();
-                                  if (thisObject != null) {
-                                      removeCnGmsFeatures(thisObject, "before getAvailableFeatures");
-                                  }
-                                  return chain.proceed();
-                              });
-                          }
-                      }
+                      hookConstructors(systemConfigClass, removeFeatureMethod);
+                      hookGetAvailableFeatures(systemConfigClass, removeFeatureMethod);
 
                       logInfo("SystemConfig hooks installed");
                   } catch (Throwable t) {
@@ -213,23 +181,66 @@ jobs:
                   }
               }
 
-              private void removeCnGmsFeatures(Object systemConfig, String source) {
-                  boolean ok1 = callRemoveFeature(systemConfig, FEATURE_CN_GMS);
-                  boolean ok2 = callRemoveFeature(systemConfig, FEATURE_SERVICES_UPDATER);
+              private void hookConstructors(Class<?> systemConfigClass, Method removeFeatureMethod) {
+                  for (Constructor<?> constructor : systemConfigClass.getDeclaredConstructors()) {
+                      try {
+                          constructor.setAccessible(true);
+                          hook(constructor).intercept(chain -> {
+                              Object result = chain.proceed();
+                              Object thisObject = chain.getThisObject();
+                              if (thisObject != null) {
+                                  removeCnGmsFeatures(removeFeatureMethod, thisObject, "constructor");
+                              }
+                              return result;
+                          });
+                      } catch (Throwable t) {
+                          logError("constructor hook failed: " + constructor, t);
+                      }
+                  }
+              }
 
-                  if (!loggedOnce || !ok1 || !ok2) {
-                      loggedOnce = true;
+              private void hookGetAvailableFeatures(Class<?> systemConfigClass, Method removeFeatureMethod) {
+                  boolean hooked = false;
+                  for (Method method : systemConfigClass.getDeclaredMethods()) {
+                      if (!"getAvailableFeatures".equals(method.getName())) {
+                          continue;
+                      }
+
+                      try {
+                          method.setAccessible(true);
+                          hook(method).intercept(chain -> {
+                              Object thisObject = chain.getThisObject();
+                              if (thisObject != null) {
+                                  removeCnGmsFeatures(removeFeatureMethod, thisObject, "before getAvailableFeatures");
+                              }
+                              return chain.proceed();
+                          });
+                          hooked = true;
+                      } catch (Throwable t) {
+                          logError("getAvailableFeatures hook failed: " + method, t);
+                      }
+                  }
+
+                  if (!hooked) {
+                      logInfo("getAvailableFeatures method not found; constructor hook remains active");
+                  }
+              }
+
+              private void removeCnGmsFeatures(Method removeFeatureMethod, Object systemConfig, String source) {
+                  boolean ok1 = callRemoveFeature(removeFeatureMethod, systemConfig, FEATURE_CN_GMS);
+                  boolean ok2 = callRemoveFeature(removeFeatureMethod, systemConfig, FEATURE_SERVICES_UPDATER);
+
+                  if (!loggedSuccessOnce || !ok1 || !ok2) {
+                      loggedSuccessOnce = ok1 && ok2;
                       logInfo(source + ": removeFeature results: "
                               + FEATURE_CN_GMS + "=" + ok1 + ", "
                               + FEATURE_SERVICES_UPDATER + "=" + ok2);
                   }
               }
 
-              private boolean callRemoveFeature(Object systemConfig, String featureName) {
+              private boolean callRemoveFeature(Method removeFeatureMethod, Object systemConfig, String featureName) {
                   try {
-                      Method method = systemConfig.getClass().getDeclaredMethod("removeFeature", String.class);
-                      method.setAccessible(true);
-                      method.invoke(systemConfig, featureName);
+                      removeFeatureMethod.invoke(systemConfig, featureName);
                       return true;
                   } catch (Throwable t) {
                       logError("removeFeature failed for " + featureName, t);
@@ -258,12 +269,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk out/CnGmsUnlocker-api101-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk out/CnGmsUnlocker-api101-v1.0.2-debug.apk
           ls -lh out
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CnGmsUnlocker-api101-debug-apk
-          path: out/CnGmsUnlocker-api101-debug.apk
+          name: CnGmsUnlocker-api101-v1.0.2-debug-apk
+          path: out/CnGmsUnlocker-api101-v1.0.2-debug.apk
           if-no-files-found: error
